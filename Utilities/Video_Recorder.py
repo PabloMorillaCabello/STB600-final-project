@@ -16,7 +16,7 @@ converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
 # ----------------------------
 # Setup video writer
 # ----------------------------
-output_filename = "basler_recording.avi"
+output_filename = "videos/basler_recording.avi"
 
 # You will know frame size after first frame is received
 fourcc = cv2.VideoWriter_fourcc(*"MJPG")
@@ -41,7 +41,9 @@ while camera.IsGrabbing():
         video_writer.write(frame)
 
         # show live preview (if GUI available)
-        cv2.imshow('basler live feed', frame)
+        # resize for better visualization (but make sure to maintain aspect ratio)
+        resized = cv2.resize(frame, (640, int(640 * frame.shape[0] / frame.shape[1])))
+        cv2.imshow('basler live feed', resized)
         if cv2.waitKey(1) == 27:  # ESC to exit
             break
 

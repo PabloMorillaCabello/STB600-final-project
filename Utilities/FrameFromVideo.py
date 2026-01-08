@@ -1,9 +1,10 @@
 import cv2
 
-target_time_sec = 27.75 # time in seconds to capture the frame
+target_time_sec = 6.7 # time in seconds to capture the frame
 
 # path video
-video_path = 'basler_recording_4.avi'
+# video_path = 'videos/basler_recording_4.avi'
+video_path = 'videos/straight_mixed.avi'
 
 cap = cv2.VideoCapture(video_path)
 

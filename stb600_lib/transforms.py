@@ -66,13 +66,14 @@ def rotate_if_blue_piece_upside_down(
     img_bgr,
     features_list,
     main_contour_height,
-    bottom_fraction=0.33
+    top_fraction=0.33
 ):
     """
     Rotate image 180 degrees if a blue piece appears upside down.
 
-    Detects upside-down blue pieces by checking if the highest sub-section
-    contour is more than 1/3 from the top.
+    Detects upside-down blue pieces by checking if the topmost sub-part
+    (small/medium/large) is NOT in the top portion of the image.
+    If no sub-parts are in the top third, the piece is likely upside down.
 
     Parameters
     ----------
@@ -82,8 +83,8 @@ def rotate_if_blue_piece_upside_down(
         Feature dictionaries with "label" and "bounding_rect" keys.
     main_contour_height : int
         Height of the main contour for reference.
-    bottom_fraction : float
-        Fraction of height considered "bottom" threshold.
+    top_fraction : float
+        Fraction of height that defines the "top" region (default 0.33 = top third).
 
     Returns
     -------
@@ -100,14 +101,15 @@ def rotate_if_blue_piece_upside_down(
     if img_bgr is None:
         raise ValueError("img_bgr is None.")
 
-    bottom_start_y = int(main_contour_height * (1.0 - bottom_fraction))
+    # Top region ends at top_fraction * height
+    top_end_y = int(main_contour_height * top_fraction)
 
     highest_cy = None
 
     for f in features_list:
         label = f.get("label", None)
         bounding_rect = f.get("bounding_rect", (None, None, None, None))
-        cy = bounding_rect[1]  # y from bbox
+        cy = bounding_rect[1]  # y from bbox (top of bounding box)
 
         if label not in ("small", "medium", "large"):
             continue
@@ -117,7 +119,8 @@ def rotate_if_blue_piece_upside_down(
         if highest_cy is None or cy < highest_cy:
             highest_cy = cy
 
-    if highest_cy is not None and highest_cy >= bottom_start_y:
+    # If topmost sub-part is NOT in the top region, piece is upside down
+    if highest_cy is not None and highest_cy > top_end_y:
         rotated_img = cv2.rotate(img_bgr, cv2.ROTATE_180)
         return rotated_img, True
     else:

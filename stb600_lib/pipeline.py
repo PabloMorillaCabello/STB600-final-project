@@ -221,7 +221,7 @@ def process_piece(
             img_bgr=current_part,
             features_list=features_list,
             main_contour_height=current_part.shape[0],
-            bottom_fraction=0.33
+            top_fraction=0.33
         )
 
     if debug:

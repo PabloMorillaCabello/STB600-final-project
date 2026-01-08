@@ -36,7 +36,6 @@ from .display import (
 from .color import (
     remove_color_hsv,
     detect_piece_color_and_check_size,
-    classify_main_part_by_area_and_color,
     detect_color_parts,
 )
 
@@ -52,16 +51,12 @@ from .contours import (
     find_and_draw_contours_with_area_limits,
     extract_contour_features,
     label_contour_by_extent_and_area,
-    crop_region_from_contour,
     crop_and_align_vertical,
 )
 
 # ROI functions
 from .roi import (
-    compute_safe_horizontal_rois,
-    split_safe_horizontal_rois_and_count,
     split_fixed_horizontal_rois_and_count,
-    split_rois_by_max_vertical_gaps,
 )
 
 # Decoding functions
@@ -96,7 +91,6 @@ __all__ = [
     # Color
     "remove_color_hsv",
     "detect_piece_color_and_check_size",
-    "classify_main_part_by_area_and_color",
     "detect_color_parts",
     # Morphology
     "apply_morphological_closing",
@@ -106,13 +100,9 @@ __all__ = [
     "find_and_draw_contours_with_area_limits",
     "extract_contour_features",
     "label_contour_by_extent_and_area",
-    "crop_region_from_contour",
     "crop_and_align_vertical",
     # ROI
-    "compute_safe_horizontal_rois",
-    "split_safe_horizontal_rois_and_count",
     "split_fixed_horizontal_rois_and_count",
-    "split_rois_by_max_vertical_gaps",
     # Decoding
     "decode_roi_to_number",
     "digits_to_int",

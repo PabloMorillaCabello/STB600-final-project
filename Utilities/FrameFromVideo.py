@@ -1,6 +1,6 @@
 import cv2
 
-target_time_sec = 6.7 # time in seconds to capture the frame
+target_time_sec = 9 # time in seconds to capture the frame
 
 # path video
 # video_path = 'videos/basler_recording_4.avi'

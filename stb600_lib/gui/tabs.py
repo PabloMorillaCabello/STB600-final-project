@@ -611,7 +611,7 @@ class LabeledPartsTab(BaseTab):
         if not rotated and self.app.piece_color == "blue":
             h = current_part.shape[0]
             rotated_part, did_rotate = rotate_if_blue_piece_upside_down(
-                current_part, features_list, main_contour_height=h, bottom_fraction=0.33
+                current_part, features_list, main_contour_height=h, top_fraction=0.33
             )
             if did_rotate:
                 rotated = True

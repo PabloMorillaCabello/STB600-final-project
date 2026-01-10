@@ -456,21 +456,26 @@ class VideoProcessorApp:
             
             # Draw on frame using shared drawing function
             x, y, w, h = data["bounding_box"]
-            is_counted = self.piece_counter.is_counted(track_id)
             
-            # Generate label text
-            label = f"#{track_id}"
+            # Generate label: "COLOR - value" or "FAKE - value"
+            if data["is_consistent"]:
+                color_name = data["piece_color"].upper()
+            else:
+                color_name = "FAKE"
+            
             if data["value"] is not None:
-                label += f" ={data['value']}"
+                label = f"{color_name} - {data['value']}"
+            else:
+                label = color_name
             
-            # Use shared drawing function for consistent styling
+            # Use shared drawing function (is_counted=False to keep original color)
             draw_piece_box(
                 out_frame,
                 bounding_box=(x, y, w, h),
                 piece_color=data["piece_color"],
                 label_text=label,
                 is_consistent=data["is_consistent"],
-                is_counted=is_counted,
+                is_counted=False,
                 draw_center=True,
                 font_scale=0.8,
                 thickness=2,

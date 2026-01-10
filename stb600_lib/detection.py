@@ -174,7 +174,7 @@ def get_detection_ranges(config: dict) -> Tuple[Tuple[int, int], Tuple[int, int]
     overall_min : int
         Expanded minimum (80% of red_min) for catching fakes.
     overall_max : int
-        Expanded maximum (120% of blue_max) for catching fakes.
+        Expanded maximum (150% of blue_max) for catching fakes.
     """
     bc = config.get("big_contours", {})
     
@@ -182,9 +182,10 @@ def get_detection_ranges(config: dict) -> Tuple[Tuple[int, int], Tuple[int, int]
     yellow_range = (bc.get("yellow_min", 80000), bc.get("yellow_max", 160000))
     blue_range = (bc.get("blue_min", 160000), bc.get("blue_max", 250000))
     
-    # Expand detection range by 20% to catch potential fakes
+    # Expand detection range to catch potential fakes
+    # 20% smaller than red_min, 50% larger than blue_max
     overall_min = int(red_range[0] * 0.8)
-    overall_max = int(blue_range[1] * 1.2)
+    overall_max = int(blue_range[1] * 1.5)
     
     return red_range, yellow_range, blue_range, overall_min, overall_max
 

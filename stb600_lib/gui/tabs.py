@@ -12,7 +12,7 @@ from tkinter import ttk, filedialog
 
 from .base import BaseTab
 from ..io import load_source_cv2
-from ..color import detect_piece_color_and_check_size
+from ..color import detect_piece_color_and_check_size, classify_by_color_ranges
 from ..contours import crop_and_align_vertical, extract_contour_features
 from ..display import show_image
 from ..transforms import rotate_if_marker_bottom, rotate_if_blue_piece_upside_down
@@ -47,6 +47,9 @@ class InputTab(BaseTab):
         self.app.SECOND_COLOR = value
         # Only ROIs differ per color, shared settings stay the same
         self.app.apply_rois_for_color(value)
+        # Update ROI tab button text to show new color
+        if hasattr(self.app, 'tab_rois') and hasattr(self.app.tab_rois, '_update_save_button_text'):
+            self.app.tab_rois._update_save_button_text()
         self.app.initial_update()
 
     def load_image(self):
@@ -69,6 +72,32 @@ class InputTab(BaseTab):
 
         self.app.set_base_image(img)
         self.update_image()
+        
+        # Run full pipeline to detect color (InnerColorPartsTab sets app.piece_color)
+        self.app.initial_update()
+        
+        # Sync dropdown with detected color from pipeline
+        self._sync_color_dropdown()
+
+    def _sync_color_dropdown(self):
+        """
+        Sync the dropdown with the color detected by the pipeline.
+        
+        The color detection happens in InnerColorPartsTab and stores the
+        result in self.app.piece_color. This method updates the dropdown
+        to match, loading the appropriate ROI settings.
+        """
+        detected = self.app.piece_color
+        current = self.color_var.get()
+        
+        if detected in ("blue", "yellow", "red") and detected != current:
+            self.color_var.set(detected)
+            self.app.SECOND_COLOR = detected
+            # Load ROI settings for the detected color
+            self.app.apply_rois_for_color(detected)
+            # Update ROI tab button text to show detected color
+            if hasattr(self.app, 'tab_rois') and hasattr(self.app.tab_rois, '_update_save_button_text'):
+                self.app.tab_rois._update_save_button_text()
 
     def toggle_camera(self):
         """Toggle camera on/off."""
@@ -204,42 +233,172 @@ class OpeningTab(BaseTab):
 
 
 class BigContoursTab(BaseTab):
-    """Tab for detecting and filtering large contours by area."""
+    """Tab for detecting and filtering large contours by area with per-color ranges.
+    
+    Known physical sizes (mm):
+    - Red: 38 x 76 = 2888 mm²
+    - Yellow: 38 x 114 = 4332 mm²
+    - Blue: 38 x 150 = 5700 mm²
+    
+    Each color has its own min/max range. Pieces falling between ranges are flagged as fakes.
+    """
+
+    # Physical area constants (mm²)
+    PHYSICAL_AREAS = {"red": 2888, "yellow": 4332, "blue": 5700}
+    TOLERANCE = 0.05  # 5% tolerance for fake detection
 
     def __init__(self, parent, app):
         super().__init__(parent, app, title="4) Large contours")
 
-        self.min_area = tk.IntVar(value=10000)
-        self.max_area = tk.IntVar(value=200000)
-        self.small_max = tk.IntVar(value=30000)
-        self.medium_max = tk.IntVar(value=90000)
+        # Per-color min/max ranges (6 sliders total)
+        self.red_min = tk.IntVar(value=5000)
+        self.red_max = tk.IntVar(value=80000)
+        self.yellow_min = tk.IntVar(value=80000)
+        self.yellow_max = tk.IntVar(value=160000)
+        self.blue_min = tk.IntVar(value=160000)
+        self.blue_max = tk.IntVar(value=250000)
 
-        ttk.Label(self.controls, text="Min area").grid(row=0, column=0, sticky="w")
-        tk.Scale(self.controls, from_=0, to=200000, orient="horizontal", length=180,
-                 variable=self.min_area, resolution=1000,
-                 command=lambda v: self.update_image()
-                 ).grid(row=1, column=0, sticky="we")
+        row = 0
+        # Red range
+        ttk.Label(self.controls, text="Red (small)", font=("", 9, "bold"),
+                  foreground="#008800").grid(row=row, column=0, sticky="w")
+        row += 1
+        self._add_range_sliders("red", row)
+        row += 2
 
-        ttk.Label(self.controls, text="Max area").grid(row=2, column=0, sticky="w")
-        tk.Scale(self.controls, from_=0, to=500000, orient="horizontal", length=180,
-                 variable=self.max_area, resolution=1000,
-                 command=lambda v: self.update_image()
-                 ).grid(row=3, column=0, sticky="we")
+        # Yellow range
+        ttk.Label(self.controls, text="Yellow (medium)", font=("", 9, "bold"),
+                  foreground="#CC8800").grid(row=row, column=0, sticky="w")
+        row += 1
+        self._add_range_sliders("yellow", row)
+        row += 2
 
-        ttk.Label(self.controls, text="Small max").grid(row=4, column=0, sticky="w")
-        tk.Scale(self.controls, from_=0, to=200000, orient="horizontal", length=180,
-                 variable=self.small_max, resolution=1000,
-                 command=lambda v: self.update_image()
-                 ).grid(row=5, column=0, sticky="we")
+        # Blue range
+        ttk.Label(self.controls, text="Blue (large)", font=("", 9, "bold"),
+                  foreground="#0066CC").grid(row=row, column=0, sticky="w")
+        row += 1
+        self._add_range_sliders("blue", row)
+        row += 2
 
-        ttk.Label(self.controls, text="Medium max").grid(row=6, column=0, sticky="w")
-        tk.Scale(self.controls, from_=0, to=400000, orient="horizontal", length=180,
-                 variable=self.medium_max, resolution=1000,
-                 command=lambda v: self.update_image()
-                 ).grid(row=7, column=0, sticky="we")
+        # Area display text box
+        ttk.Label(self.controls, text="Detected areas:").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        row += 1
+        self.area_text = tk.Text(self.controls, height=5, width=28, state="disabled")
+        self.area_text.grid(row=row, column=0, sticky="we", pady=(2, 0))
+        row += 1
+
+        # Suggested boundaries display
+        ttk.Label(self.controls, text="Suggested (±5%):").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        row += 1
+        self.suggest_text = tk.Text(self.controls, height=5, width=28, state="disabled")
+        self.suggest_text.grid(row=row, column=0, sticky="we", pady=(2, 0))
+        row += 1
+
+        # Apply suggested button
+        self.apply_btn = ttk.Button(self.controls, text="Apply Suggested", command=self._apply_suggested)
+        self.apply_btn.grid(row=row, column=0, sticky="we", pady=(5, 0))
+
+        # Store suggested values for apply button
+        self._suggested_ranges = None
+
+    def _add_range_sliders(self, color, start_row):
+        """Add min/max sliders for a specific color."""
+        min_var = getattr(self, f"{color}_min")
+        max_var = getattr(self, f"{color}_max")
+
+        # Min slider
+        frame_min = ttk.Frame(self.controls)
+        frame_min.grid(row=start_row, column=0, sticky="we")
+        ttk.Label(frame_min, text="min:", width=4).pack(side="left")
+        tk.Scale(frame_min, from_=0, to=500000, orient="horizontal", length=150,
+                 variable=min_var, resolution=1000,
+                 command=lambda v: self.update_image()).pack(side="left", fill="x", expand=True)
+
+        # Max slider
+        frame_max = ttk.Frame(self.controls)
+        frame_max.grid(row=start_row + 1, column=0, sticky="we")
+        ttk.Label(frame_max, text="max:", width=4).pack(side="left")
+        tk.Scale(frame_max, from_=0, to=500000, orient="horizontal", length=150,
+                 variable=max_var, resolution=1000,
+                 command=lambda v: self.update_image()).pack(side="left", fill="x", expand=True)
+
+    def _calculate_suggested_boundaries(self, main_area, main_color):
+        """Calculate suggested per-color ranges based on detected main piece.
+        
+        Args:
+            main_area: Measured pixel area of the main piece
+            main_color: Color of the main piece ('red', 'yellow', or 'blue')
+        
+        Returns:
+            dict with suggested min/max for each color
+        """
+        phys = self.PHYSICAL_AREAS
+        tol = self.TOLERANCE
+
+        main_phys_area = phys.get(main_color.lower())
+        if not main_phys_area:
+            return None
+
+        # Calculate pixels-per-mm² ratio from the known piece
+        ratio = main_area / main_phys_area
+
+        # Calculate expected pixel areas and ranges for each color
+        ranges = {}
+        for clr in ["red", "yellow", "blue"]:
+            expected = phys[clr] * ratio
+            ranges[clr] = {
+                "min": int(expected * (1 - tol)),
+                "max": int(expected * (1 + tol)),
+                "expected": int(expected),
+            }
+
+        return ranges
+
+    def _apply_suggested(self):
+        """Apply all suggested boundary values to the sliders."""
+        if self._suggested_ranges is None:
+            return
+
+        for clr in ["red", "yellow", "blue"]:
+            if clr in self._suggested_ranges:
+                getattr(self, f"{clr}_min").set(self._suggested_ranges[clr]["min"])
+                getattr(self, f"{clr}_max").set(self._suggested_ranges[clr]["max"])
+        self.update_image()
+
+    def _classify_by_ranges(self, area):
+        """Classify a contour by its area using per-color ranges.
+        
+        Uses the shared classify_by_color_ranges function and adds
+        display-specific information (BGR colors, display labels).
+        
+        Returns:
+            tuple: (label, color_bgr, size_color_name)
+            - label: 'small', 'medium', 'large', or 'fake?'
+            - color_bgr: BGR color for drawing
+            - size_color_name: 'red', 'yellow', 'blue', or None for fake
+        """
+        red_range = (self.red_min.get(), self.red_max.get())
+        yellow_range = (self.yellow_min.get(), self.yellow_max.get())
+        blue_range = (self.blue_min.get(), self.blue_max.get())
+
+        size_label, expected_color = classify_by_color_ranges(area, red_range, yellow_range, blue_range)
+
+        # Map to display format with BGR colors
+        display_map = {
+            "red": ("small", (0, 255, 0)),      # Green for small/red
+            "yellow": ("medium", (0, 200, 255)), # Orange for medium/yellow
+            "blue": ("large", (255, 150, 0)),    # Blue-ish for large/blue
+        }
+
+        if expected_color is not None and expected_color in display_map:
+            label, color_bgr = display_map[expected_color]
+            return label, color_bgr, expected_color
+        else:
+            # Doesn't fit any valid range - potential fake
+            return "fake?", (128, 0, 128), None
 
     def update_image(self):
-        """Find contours, filter by area, and display with labels."""
+        """Find contours, filter by area ranges, and display with labels."""
         img = self.app.get_base_image()
         gray_closed = self.app.gray_closed
         if img is None or gray_closed is None:
@@ -247,38 +406,35 @@ class BigContoursTab(BaseTab):
 
         contours, _ = cv2.findContours(gray_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        min_a = self.min_area.get()
-        max_a = self.max_area.get()
-        small_max = self.small_max.get()
-        medium_max = self.medium_max.get()
+        # Expand detection range by 20% to catch potential fakes
+        # that are slightly smaller than red_min or larger than blue_max
+        detection_min = int(self.red_min.get() * 0.8)  # 20% smaller than red_min
+        detection_max = int(self.blue_max.get() * 1.2)  # 20% larger than blue_max
 
         filtered = []
         labeled_info = []
+        filtered_out = []  # Track pieces outside detection range
 
         for c in contours:
             area = cv2.contourArea(c)
-            if not (min_a <= area <= max_a):
-                continue
-            filtered.append(c)
-
-            if area <= small_max:
-                label = "small"
-                color = (0, 255, 0)
-            elif area <= medium_max:
-                label = "medium"
-                color = (255, 0, 0)
-            else:
-                label = "large"
-                color = (0, 255, 255)
-
+            
             M = cv2.moments(c)
             if M["m00"] != 0:
                 cx = int(M["m10"] / M["m00"])
                 cy = int(M["m01"] / M["m00"])
             else:
                 cx, cy = 0, 0
+            
+            # Filter by expanded bounds (to catch fakes)
+            if not (detection_min <= area <= detection_max):
+                # Track filtered out pieces for display
+                if area > 1000:  # Only track meaningful contours
+                    filtered_out.append((area, cx, cy))
+                continue
+            filtered.append(c)
 
-            labeled_info.append((c, label, color, (cx, cy), area))
+            label, color, size_color = self._classify_by_ranges(area)
+            labeled_info.append((c, label, color, (cx, cy), area, size_color))
 
         main_cnt = None
         main_label = None
@@ -286,26 +442,20 @@ class BigContoursTab(BaseTab):
             main_cnt = max(filtered, key=cv2.contourArea)
 
         out = img.copy()
-        for c, label, color, (cx, cy), area in labeled_info:
+        for c, label, color, (cx, cy), area, size_color in labeled_info:
             label_to_draw = label
             draw_color = color
 
             if main_cnt is not None and np.array_equal(c, main_cnt):
                 main_label = label
-                if label == "small":
-                    expected_color_from_size = "red"
-                elif label == "medium":
-                    expected_color_from_size = "yellow"
-                else:
-                    expected_color_from_size = "blue"
-
+                # Check color consistency
                 expected_piece_color = self.app.piece_color
-                if expected_piece_color != expected_color_from_size:
-                    label_to_draw = "fake"
-                    draw_color = (0, 0, 0)
+                if size_color is not None and expected_piece_color != size_color:
+                    label_to_draw = "FAKE"
+                    draw_color = (0, 0, 255)  # Red for color mismatch
 
             cv2.drawContours(out, [c], -1, draw_color, 3)
-            cv2.putText(out, label_to_draw, (cx - 20, cy),
+            cv2.putText(out, label_to_draw, (cx - 30, cy),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, draw_color, 2, cv2.LINE_AA)
 
         self.app.big_contours = filtered
@@ -316,12 +466,60 @@ class BigContoursTab(BaseTab):
 
         self.set_image(out)
 
-        # Save config
+        # Update area display - show both detected and filtered out pieces
+        self.area_text.config(state="normal")
+        self.area_text.delete("1.0", tk.END)
+        main_area = None
+        if labeled_info:
+            sorted_info = sorted(labeled_info, key=lambda x: x[4], reverse=True)
+            for i, (c, label, color, (cx, cy), area, size_color) in enumerate(sorted_info):
+                is_main = main_cnt is not None and np.array_equal(c, main_cnt)
+                marker = " *" if is_main else ""
+                if is_main:
+                    main_area = area
+                self.area_text.insert(tk.END, f"{i+1}. {label}: {area:,}{marker}\n")
+            self.area_text.insert(tk.END, f"Detected: {len(labeled_info)}\n")
+        else:
+            self.area_text.insert(tk.END, "No pieces detected\n")
+        
+        # Show filtered out pieces so user can see what's being missed
+        if filtered_out:
+            self.area_text.insert(tk.END, f"--- Outside range ---\n")
+            sorted_out = sorted(filtered_out, key=lambda x: x[0], reverse=True)
+            for area, cx, cy in sorted_out[:5]:  # Show top 5
+                self.area_text.insert(tk.END, f"  {area:,} @ ({cx},{cy})\n")
+            if len(filtered_out) > 5:
+                self.area_text.insert(tk.END, f"  (+{len(filtered_out)-5} more)\n")
+        self.area_text.config(state="disabled")
+
+        # Update suggested boundaries
+        self.suggest_text.config(state="normal")
+        self.suggest_text.delete("1.0", tk.END)
+        piece_color = self.app.piece_color
+        if main_area and piece_color in ["blue", "red", "yellow"]:
+            suggested = self._calculate_suggested_boundaries(main_area, piece_color)
+            if suggested:
+                self._suggested_ranges = suggested
+                self.suggest_text.insert(tk.END, f"From {piece_color.upper()} ({main_area:,}px):\n")
+                for clr in ["red", "yellow", "blue"]:
+                    r = suggested[clr]
+                    self.suggest_text.insert(tk.END, f"  {clr}: {r['min']:,} - {r['max']:,}\n")
+            else:
+                self.suggest_text.insert(tk.END, "Cannot calculate")
+                self._suggested_ranges = None
+        else:
+            self.suggest_text.insert(tk.END, "Place known piece,\nset color in Tab 1")
+            self._suggested_ranges = None
+        self.suggest_text.config(state="disabled")
+
+        # Save config (now with per-color ranges)
         self.app.save_config_section("big_contours", {
-            "min_area": self.min_area.get(),
-            "max_area": self.max_area.get(),
-            "small_max": self.small_max.get(),
-            "medium_max": self.medium_max.get(),
+            "red_min": self.red_min.get(),
+            "red_max": self.red_max.get(),
+            "yellow_min": self.yellow_min.get(),
+            "yellow_max": self.yellow_max.get(),
+            "blue_min": self.blue_min.get(),
+            "blue_max": self.blue_max.get(),
         })
 
 
@@ -674,8 +872,44 @@ class ROIsTab(BaseTab):
                  command=lambda v: self.update_image()
                  ).grid(row=5, column=0, sticky="we")
 
-        self.count_text = tk.Text(self.controls, height=10, width=32)
-        self.count_text.grid(row=6, column=0, sticky="we", pady=(10, 0))
+        # Save ROIs button with current color indicator
+        self.save_btn = ttk.Button(
+            self.controls, text="💾 Save ROIs", command=self._save_rois_explicit
+        )
+        self.save_btn.grid(row=6, column=0, sticky="we", pady=(10, 0))
+        
+        # Status label to show save status
+        self.status_var = tk.StringVar(value="")
+        self.status_label = ttk.Label(self.controls, textvariable=self.status_var, foreground="green")
+        self.status_label.grid(row=7, column=0, sticky="w")
+
+        self.count_text = tk.Text(self.controls, height=8, width=32)
+        self.count_text.grid(row=8, column=0, sticky="we", pady=(10, 0))
+        
+        # Update button text to show current color
+        self._update_save_button_text()
+
+    def _update_save_button_text(self):
+        """Update the save button to show current color."""
+        color = self.app.piece_color.upper()
+        self.save_btn.config(text=f"💾 Save ROIs for {color}")
+
+    def _save_rois_explicit(self):
+        """Explicitly save ROI settings for the current color."""
+        color = self.app.piece_color
+        
+        # Save to config
+        self.app.save_config_section("rois", {
+            "num_rois": self.num_rois.get(),
+            "offset_pct": self.offset_pct.get(),
+            "height_pct": self.height_pct.get(),
+        })
+        
+        # Show confirmation
+        self.status_var.set(f"✓ Saved for {color.upper()}")
+        
+        # Clear status after 3 seconds
+        self.app.root.after(3000, lambda: self.status_var.set(""))
 
     def compute_boundaries(self, h):
         """Compute ROI boundaries based on current settings."""
@@ -762,10 +996,12 @@ class ROIsTab(BaseTab):
                 f"ROI {i+1} -> marker:{c['marker']} small:{c['small']} "
                 f"medium:{c['medium']} large:{c['large']}\n"
             )
-
-        # Save config
-        self.app.save_config_section("rois", {
-            "num_rois": self.num_rois.get(),
-            "offset_pct": self.offset_pct.get(),
-            "height_pct": self.height_pct.get(),
-        })
+        
+        # Show current values (NOT auto-saved - use Save button)
+        color = self.app.piece_color.upper()
+        self.count_text.insert(
+            tk.END,
+            f"\n[{color}] ROIs: {self.num_rois.get()}, "
+            f"Offset: {self.offset_pct.get()}%, "
+            f"Height: {self.height_pct.get()}%"
+        )

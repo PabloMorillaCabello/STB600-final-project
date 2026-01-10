@@ -458,3 +458,176 @@ def annotate_part_result(
         current_y += line_height
 
     return out
+
+
+# Shared color map for piece annotations (used by both result_viewer and video_processor)
+PIECE_COLOR_MAP = {
+    "blue": (235, 99, 37),      # BGR for blue display
+    "red": (38, 38, 220),       # BGR for red display  
+    "yellow": (4, 138, 202),    # BGR for yellow display
+    "unknown": (128, 128, 128),
+}
+FAKE_COLOR = (255, 0, 255)       # Magenta for fake/inconsistent pieces
+COUNTED_COLOR = (0, 200, 0)      # Green for counted pieces (video processor)
+TRACKING_COLOR = (255, 200, 0)   # Cyan for tracking (video processor)
+
+
+def draw_piece_box(
+    img,
+    bounding_box,
+    piece_color="unknown",
+    label_text=None,
+    is_consistent=True,
+    is_counted=False,
+    draw_center=True,
+    font_scale=1.2,
+    thickness=2,
+    box_thickness=3,
+    center_radius=8,
+):
+    """
+    Draw a bounding box with label and center marker for a single piece.
+    
+    Shared function used by both result_viewer and video_processor for
+    consistent styling.
+    
+    Parameters
+    ----------
+    img : np.ndarray
+        Image to draw on (modified in-place).
+    bounding_box : tuple
+        (x, y, w, h) bounding box coordinates.
+    piece_color : str
+        Color of the piece ("blue", "red", "yellow", "unknown").
+    label_text : str or None
+        Text to display. If None, auto-generated from piece_color.
+    is_consistent : bool
+        Whether piece is consistent (True) or fake (False).
+    is_counted : bool
+        Whether piece has been counted (for video processor).
+    draw_center : bool
+        Whether to draw center marker.
+    font_scale : float
+        Font scale for label text.
+    thickness : int
+        Text thickness.
+    box_thickness : int
+        Bounding box line thickness.
+    center_radius : int
+        Radius of center marker circle.
+    
+    Returns
+    -------
+    tuple
+        (cx, cy) center coordinates of the bounding box.
+    """
+    x, y, w, h = bounding_box
+    cx, cy = x + w // 2, y + h // 2
+    
+    # Determine color based on state
+    if not is_consistent:
+        color = FAKE_COLOR
+    elif is_counted:
+        color = COUNTED_COLOR
+    else:
+        color = PIECE_COLOR_MAP.get(piece_color.lower() if piece_color else "unknown", (128, 128, 128))
+    
+    # Draw bounding box
+    cv2.rectangle(img, (x, y), (x + w, y + h), color, box_thickness)
+    
+    # Draw center marker (crosshair style)
+    if draw_center:
+        # Filled circle
+        cv2.circle(img, (cx, cy), center_radius, color, -1)
+        # White outline for visibility
+        cv2.circle(img, (cx, cy), center_radius, (255, 255, 255), 2)
+        # Crosshair lines
+        line_len = center_radius + 5
+        cv2.line(img, (cx - line_len, cy), (cx + line_len, cy), (255, 255, 255), 1)
+        cv2.line(img, (cx, cy - line_len), (cx, cy + line_len), (255, 255, 255), 1)
+    
+    # Draw label if provided
+    if label_text:
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        (text_w, text_h), baseline = cv2.getTextSize(label_text, font, font_scale, thickness)
+        
+        # Position above the bounding box
+        text_x = x
+        text_y = y - 15
+        if text_y < text_h + 10:
+            text_y = y + h + text_h + 15
+        
+        # Draw background rectangle for readability
+        padding = 6
+        cv2.rectangle(
+            img,
+            (text_x - padding, text_y - text_h - padding),
+            (text_x + text_w + padding, text_y + baseline + padding),
+            color,
+            -1
+        )
+        
+        # Draw text in white
+        cv2.putText(img, label_text, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    
+    return cx, cy
+
+
+def annotate_multiple_pieces(img, results, font_scale=1.5, thickness=3, box_thickness=4):
+    """
+    Annotate image with bounding boxes and values for all detected pieces.
+
+    Draws labeled bounding boxes around each piece with color-coded borders,
+    text labels showing the piece color and decoded value, and center markers.
+
+    Parameters
+    ----------
+    img : np.ndarray
+        Original BGR image.
+    results : list
+        List of PieceResult objects (or objects with piece_color, size_label,
+        is_consistent, total_value, and bounding_box attributes).
+    font_scale : float
+        Font scale for labels (default 1.5 for video readability).
+    thickness : int
+        Text thickness (default 3).
+    box_thickness : int
+        Bounding box line thickness (default 4).
+
+    Returns
+    -------
+    np.ndarray
+        Annotated image with bounding boxes, labels, and center markers.
+
+    Examples
+    --------
+    >>> from stb600_lib.pipeline import PieceResult
+    >>> results = [PieceResult("blue", "BIG", True, 123, contour, (10, 20, 100, 150))]
+    >>> annotated = annotate_multiple_pieces(img, results)
+    """
+    out = img.copy()
+
+    for result in results:
+        # Generate label text
+        if not result.is_consistent:
+            label = "FAKE"
+        elif result.total_value is not None:
+            label = f"{result.piece_color[0].upper()}: {result.total_value}"
+        else:
+            label = f"{result.piece_color[0].upper()}: ?"
+        
+        # Use shared drawing function
+        draw_piece_box(
+            out,
+            bounding_box=result.bounding_box,
+            piece_color=result.piece_color,
+            label_text=label,
+            is_consistent=result.is_consistent,
+            is_counted=False,
+            draw_center=True,
+            font_scale=font_scale,
+            thickness=thickness,
+            box_thickness=box_thickness,
+        )
+
+    return out

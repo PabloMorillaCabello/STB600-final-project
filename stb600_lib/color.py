@@ -9,6 +9,48 @@ import cv2
 import numpy as np
 
 
+def classify_by_color_ranges(area, red_range, yellow_range, blue_range):
+    """
+    Classify a piece by area using per-color min/max ranges.
+
+    This function determines which size category a piece belongs to based on
+    its contour area and predefined ranges for each color.
+
+    Parameters
+    ----------
+    area : float
+        Contour area in pixels.
+    red_range : tuple
+        (min, max) area range for red (small) pieces.
+    yellow_range : tuple
+        (min, max) area range for yellow (medium) pieces.
+    blue_range : tuple
+        (min, max) area range for blue (large) pieces.
+
+    Returns
+    -------
+    tuple
+        (size_label, expected_color) where:
+        - size_label: "SMALL", "MEDIUM", "BIG", or None if area doesn't fit any range
+        - expected_color: "red", "yellow", "blue", or None if area doesn't fit any range
+
+    Examples
+    --------
+    >>> classify_by_color_ranges(50000, (40000, 60000), (100000, 150000), (200000, 300000))
+    ('SMALL', 'red')
+    >>> classify_by_color_ranges(75000, (40000, 60000), (100000, 150000), (200000, 300000))
+    (None, None)  # Falls between ranges - potential fake
+    """
+    if red_range[0] <= area <= red_range[1]:
+        return "SMALL", "red"
+    elif yellow_range[0] <= area <= yellow_range[1]:
+        return "MEDIUM", "yellow"
+    elif blue_range[0] <= area <= blue_range[1]:
+        return "BIG", "blue"
+    else:
+        return None, None  # Doesn't fit any valid range
+
+
 def remove_color_hsv(img_bgr, color_name="green"):
     """
     Remove (mask out) a specific color region in a BGR image using HSV color space.

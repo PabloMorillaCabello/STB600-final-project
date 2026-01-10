@@ -11,7 +11,38 @@ from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 
 from .io import load_source_cv2
-from .color import remove_color_hsv, detect_piece_color_and_check_size, detect_color_parts
+from .color import remove_color_hsv, detect_piece_color_and_check_size, detect_color_parts, classify_by_color_ranges
+
+
+@dataclass
+class PieceResult:
+    """
+    Result container for a single detected piece.
+
+    This dataclass holds all detection results for one piece after
+    running through the image processing pipeline.
+
+    Attributes
+    ----------
+    piece_color : str
+        Detected piece color ("red", "yellow", "blue").
+    size_label : str
+        Size classification ("SMALL", "MEDIUM", "BIG", or "UNKNOWN").
+    is_consistent : bool
+        True if detected color matches expected color for size.
+    total_value : int or None
+        Decoded value from ROIs, or None if decoding failed.
+    contour : np.ndarray
+        OpenCV contour array for the piece.
+    bounding_box : tuple
+        Bounding rectangle as (x, y, width, height).
+    """
+    piece_color: str
+    size_label: str
+    is_consistent: bool
+    total_value: Optional[int]
+    contour: np.ndarray
+    bounding_box: tuple  # (x, y, w, h)
 from .morphology import binarize_and_invert, apply_morphological_opening
 from .contours import (
     find_and_draw_contours_with_area_limits,

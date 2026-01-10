@@ -4,7 +4,7 @@ target_time_sec = 9 # time in seconds to capture the frame
 
 # path video
 # video_path = 'videos/basler_recording_4.avi'
-video_path = 'videos/straight_mixed.avi'
+video_path = 'videos/none_mixed.avi'
 
 cap = cv2.VideoCapture(video_path)
 

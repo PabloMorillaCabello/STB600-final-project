@@ -2,29 +2,31 @@
   "shared": {
     "remove_green": {
       "h_low": 35,
-      "h_high": 85
+      "h_high": 75
     },
     "binarize": {
       "thresh_value": 0
     },
     "opening": {
-      "kernel_size": 5,
+      "kernel_size": 3,
       "iterations": 1
     },
     "big_contours": {
-      "min_area": 10000,
-      "max_area": 500000,
-      "small_max": 200000,
-      "medium_max": 338000
+      "red_min": 181753,
+      "red_max": 200885,
+      "yellow_min": 272630,
+      "yellow_max": 301327,
+      "blue_min": 358723,
+      "blue_max": 396484
     },
     "inner_parts": {
-      "min_area": 50,
-      "max_area": 10000
+      "min_area": 1180,
+      "max_area": 10450
     },
     "labeled": {
       "extent_threshold": 0.5,
-      "small_area_max": 2100,
-      "medium_area_max": 5600
+      "small_area_max": 1900,
+      "medium_area_max": 6950
     }
   },
   "rois": {
@@ -40,8 +42,8 @@
     },
     "yellow": {
       "num_rois": 3,
-      "offset_pct": 0,
-      "height_pct": 100
+      "offset_pct": 25,
+      "height_pct": 61
     }
   }
 }

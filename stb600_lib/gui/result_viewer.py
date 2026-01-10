@@ -3,24 +3,363 @@ Result Viewer GUI - Automatic Pipeline with Value Display
 ==========================================================
 
 A simple GUI that loads an image, runs the full pipeline automatically,
-and displays the result with bounding box and decoded value.
+and displays the result with bounding boxes and decoded values for multiple pieces.
 """
 
 import cv2
+import numpy as np
 import tkinter as tk
 from tkinter import ttk, filedialog
 from PIL import Image, ImageTk
+from typing import List
 
-from ..pipeline import process_piece, PipelineResult
-from ..color import detect_piece_color_and_check_size
+from ..color import classify_by_color_ranges
+from ..contours import (
+    extract_contour_features,
+    label_contour_by_extent_and_area,
+    crop_and_align_vertical,
+)
+from ..detection import detect_pieces_in_frame, get_detection_ranges
+from ..display import annotate_multiple_pieces
+from ..decoding import decode_roi_to_number, compute_total_value_from_rois
+from ..transforms import rotate_if_marker_bottom, rotate_if_blue_piece_upside_down
+from ..pipeline import PieceResult
 from .config import load_config, get_color_config, DEFAULT_CONFIG_PATH
+
+
+def compute_rois_from_config(image_shape, features_list, piece_color, roi_config):
+    """
+    Compute ROIs using saved config settings (matching run_pipeline_gui behavior).
+
+    Parameters
+    ----------
+    image_shape : tuple
+        Image shape (height, width, ...).
+    features_list : list of dict
+        Feature dictionaries with "centroid" and "label".
+    piece_color : str
+        Piece color for ROI configuration.
+    roi_config : dict
+        ROI settings per color {"red": {"num_rois": 2, ...}, ...}.
+
+    Returns
+    -------
+    rois : list of dict
+        ROI descriptors with counts.
+    boundaries : list of tuple
+        (y_start, y_end) for each ROI.
+    
+    Raises
+    ------
+    ValueError
+        If roi_config is missing or doesn't have settings for the piece color.
+    """
+    if not roi_config:
+        raise ValueError("ROI config is required. Run run_pipeline_gui to configure ROI settings.")
+    
+    h, w = image_shape[:2]
+    color = (piece_color or "").lower()
+
+    # Get color-specific ROI settings from config
+    color_roi = roi_config.get(color)
+    if not color_roi:
+        raise ValueError(f"No ROI config found for '{color}'. Run run_pipeline_gui and save ROI settings for {color}.")
+    
+    num_rois = color_roi.get("num_rois")
+    offset_pct = color_roi.get("offset_pct")
+    height_pct = color_roi.get("height_pct")
+    
+    if num_rois is None or offset_pct is None or height_pct is None:
+        raise ValueError(f"Incomplete ROI config for '{color}'. Expected num_rois, offset_pct, height_pct.")
+
+    # Compute boundaries (same logic as ROIsTab.compute_boundaries)
+    offset_frac = max(0.0, min(offset_pct / 100.0, 1.0))
+    height_frac = max(0.05, min(height_pct / 100.0, 1.0 - offset_frac))
+
+    roi_y_start = int(h * offset_frac)
+    roi_y_end = int(h * (offset_frac + height_frac))
+    roi_y_start = max(0, min(roi_y_start, h - 1))
+    roi_y_end = max(roi_y_start + 1, min(roi_y_end, h))
+
+    total_roi_height = roi_y_end - roi_y_start
+    step = total_roi_height // num_rois if num_rois > 0 else total_roi_height
+
+    boundaries = []
+    for i in range(num_rois):
+        y_start = roi_y_start + i * step
+        if i == num_rois - 1:
+            y_end = roi_y_end
+        else:
+            y_end = roi_y_start + (i + 1) * step
+        boundaries.append((y_start, y_end))
+
+    # Build ROIs with counts
+    rois = []
+    for i, (ys, ye) in enumerate(boundaries):
+        rois.append({
+            "index": i,
+            "y_start": ys,
+            "y_end": ye,
+            "counts": {"marker": 0, "small": 0, "medium": 0, "large": 0, "unknown": 0}
+        })
+
+    # Count features per ROI
+    for f in features_list:
+        cx, cy = f.get("centroid", (None, None))
+        label = f.get("label", "unknown")
+        if cy is None:
+            continue
+        cy = int(cy)
+
+        for roi in rois:
+            if roi["y_start"] <= cy < roi["y_end"]:
+                if label in roi["counts"]:
+                    roi["counts"][label] += 1
+                else:
+                    roi["counts"]["unknown"] += 1
+                break
+
+    return rois, boundaries
+
+
+def process_single_contour(
+    img,
+    contour,
+    red_range=(5000, 80000),
+    yellow_range=(80000, 160000),
+    blue_range=(160000, 250000),
+    inner_min_area=50,
+    inner_max_area=10000,
+    extent_threshold=0.5,
+    label_small_area_max=2100,
+    label_medium_area_max=5600,
+    roi_config=None,
+    debug=False,
+):
+    """
+    Process a single contour through the detection pipeline.
+
+    Parameters
+    ----------
+    img : np.ndarray
+        Original BGR image.
+    contour : np.ndarray
+        Contour to process.
+    red_range : tuple
+        (min, max) area range for red (small) pieces.
+    yellow_range : tuple
+        (min, max) area range for yellow (medium) pieces.
+    blue_range : tuple
+        (min, max) area range for blue (large) pieces.
+    roi_config : dict or None
+        ROI settings per color from pipeline_config.json.
+        e.g. {"red": {"num_rois": 2, "offset_pct": 0, "height_pct": 100}, ...}
+    debug : bool
+        If True, print debug information.
+    Other parameters control inner part detection and labeling.
+
+    Returns
+    -------
+    PieceResult or None
+        Detection result for this piece, or None if rejected (not a valid piece).
+    """
+    area = cv2.contourArea(contour)
+    
+    # First, classify by area using per-color ranges
+    size_label, expected_color_from_size = classify_by_color_ranges(
+        area, red_range, yellow_range, blue_range
+    )
+    
+    # If area doesn't fit any range, it's a fake by size
+    size_is_fake = (size_label is None)
+    if size_is_fake:
+        size_label = "UNKNOWN"  # Will show as fake
+    
+    # Detect actual piece color from image
+    # Create contour mask
+    mask = np.zeros(img.shape[:2], dtype=np.uint8)
+    cv2.drawContours(mask, [contour], -1, 255, thickness=-1)
+    
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    
+    # HSV ranges for color detection
+    blue_lower, blue_upper = np.array([100, 80, 80]), np.array([130, 255, 255])
+    yellow_lower, yellow_upper = np.array([20, 80, 80]), np.array([35, 255, 255])
+    red_lower1, red_upper1 = np.array([0, 70, 50]), np.array([10, 255, 255])
+    red_lower2, red_upper2 = np.array([160, 70, 50]), np.array([179, 255, 255])
+    
+    blue_mask = cv2.bitwise_and(cv2.inRange(hsv, blue_lower, blue_upper), mask)
+    yellow_mask = cv2.bitwise_and(cv2.inRange(hsv, yellow_lower, yellow_upper), mask)
+    red_mask = cv2.bitwise_or(
+        cv2.bitwise_and(cv2.inRange(hsv, red_lower1, red_upper1), mask),
+        cv2.bitwise_and(cv2.inRange(hsv, red_lower2, red_upper2), mask)
+    )
+    
+    color_counts = {
+        "blue": cv2.countNonZero(blue_mask),
+        "yellow": cv2.countNonZero(yellow_mask),
+        "red": cv2.countNonZero(red_mask),
+    }
+    
+    # Determine actual piece color
+    piece_color = max(color_counts, key=color_counts.get)
+    dominant_pixels = color_counts[piece_color]
+    color_pct = (dominant_pixels / area * 100) if area > 0 else 0
+    
+    # Determine consistency:
+    # 1. Size must fit a valid range
+    # 2. Detected color must match expected color for that size
+    if size_is_fake:
+        is_consistent = False
+    else:
+        is_consistent = (piece_color == expected_color_from_size)
+    
+    # Debug output
+    if debug:
+        print(f"Piece detected: color={piece_color}, size={size_label}, area={area:.0f}, "
+              f"color_pct={color_pct:.1f}%, expected_color={expected_color_from_size}, consistent={is_consistent}")
+    
+    second_color = piece_color if is_consistent else "blue"
+
+    # Crop and align
+    cropped_aligned = crop_and_align_vertical(img, contour)
+    if cropped_aligned is None or cropped_aligned.size == 0:
+        x, y, w, h = cv2.boundingRect(contour)
+        H, W = img.shape[:2]
+        x = max(0, min(x, W - 1))
+        y = max(0, min(y, H - 1))
+        w = max(1, min(w, W - x))
+        h = max(1, min(h, H - y))
+        cropped_aligned = img[y:y + h, x:x + w]
+
+    current_part = cropped_aligned
+
+    # Detect internal color parts (same logic as InnerColorPartsTab)
+    hsv = cv2.cvtColor(current_part, cv2.COLOR_BGR2HSV)
+    
+    if second_color == "blue":
+        lower = np.array([90, 50, 50])
+        upper = np.array([130, 255, 255])
+    elif second_color == "red":
+        lower = np.array([0, 50, 50])
+        upper = np.array([10, 255, 255])
+    else:  # yellow
+        lower = np.array([20, 50, 50])
+        upper = np.array([35, 255, 255])
+    
+    inner_mask = cv2.inRange(hsv, lower, upper)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    inner_mask_closed = cv2.morphologyEx(inner_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    inner_contours, _ = cv2.findContours(inner_mask_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Filter by area (using config values)
+    part_contours = []
+    for c in inner_contours:
+        c_area = cv2.contourArea(c)
+        if inner_min_area <= c_area <= inner_max_area:
+            part_contours.append(c)
+
+    # Extract features and label
+    features_list = extract_contour_features(part_contours)
+    for f in features_list:
+        f["label"] = label_contour_by_extent_and_area(
+            f,
+            extent_threshold=extent_threshold,
+            small_area_max=label_small_area_max,
+            medium_area_max=label_medium_area_max
+        )
+
+    # Check rotation
+    rotated = False
+    rotated_part, did_rotate = rotate_if_marker_bottom(
+        current_part, features_list, bottom_fraction=0.33
+    )
+    if did_rotate:
+        rotated = True
+        current_part = rotated_part
+
+    if not rotated and piece_color == "blue":
+        rotated_part, did_rotate = rotate_if_blue_piece_upside_down(
+            current_part, features_list,
+            main_contour_height=current_part.shape[0],
+            top_fraction=0.33
+        )
+        if did_rotate:
+            rotated = True
+            current_part = rotated_part
+
+    # If rotated, recalculate features using same logic as above
+    if rotated:
+        hsv = cv2.cvtColor(current_part, cv2.COLOR_BGR2HSV)
+        
+        if second_color == "blue":
+            lower = np.array([90, 50, 50])
+            upper = np.array([130, 255, 255])
+        elif second_color == "red":
+            lower = np.array([0, 50, 50])
+            upper = np.array([10, 255, 255])
+        else:  # yellow
+            lower = np.array([20, 50, 50])
+            upper = np.array([35, 255, 255])
+        
+        inner_mask = cv2.inRange(hsv, lower, upper)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        inner_mask_closed = cv2.morphologyEx(inner_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        inner_contours, _ = cv2.findContours(inner_mask_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        part_contours = []
+        for c in inner_contours:
+            c_area = cv2.contourArea(c)
+            if inner_min_area <= c_area <= inner_max_area:
+                part_contours.append(c)
+        
+        features_list = extract_contour_features(part_contours)
+        for f in features_list:
+            f["label"] = label_contour_by_extent_and_area(
+                f,
+                extent_threshold=extent_threshold,
+                small_area_max=label_small_area_max,
+                medium_area_max=label_medium_area_max
+            )
+
+    # Compute ROIs using config (must be provided)
+    rois, boundaries = compute_rois_from_config(
+        image_shape=current_part.shape,
+        features_list=features_list,
+        piece_color=piece_color,
+        roi_config=roi_config,
+    )
+
+    decoded_digits = []
+    for r in rois:
+        try:
+            digit = decode_roi_to_number(r["counts"])
+            decoded_digits.append(digit)
+        except ValueError as e:
+            if debug:
+                print(f"  ROI {r.get('index', '?')} decode failed: {e}, counts={r['counts']}")
+            decoded_digits.append(None)
+
+    total_value = compute_total_value_from_rois(decoded_digits, piece_color)
+
+    # Get bounding box
+    x, y, w, h = cv2.boundingRect(contour)
+
+    return PieceResult(
+        piece_color=piece_color,
+        size_label=size_label,
+        is_consistent=is_consistent,
+        total_value=total_value,
+        contour=contour,
+        bounding_box=(x, y, w, h),
+    )
 
 
 class ResultViewerApp:
     """
-    Simple result viewer that runs the full pipeline on loaded images.
+    Result viewer that processes multiple pieces in loaded images.
 
-    Displays the annotated image with bounding box and decoded value.
+    Displays annotated image with bounding boxes and decoded values for all pieces.
     Designed for easy extension to video and camera input.
 
     Parameters
@@ -33,20 +372,21 @@ class ResultViewerApp:
 
     def __init__(self, root, config_path=DEFAULT_CONFIG_PATH):
         self.root = root
-        self.root.title("STB600 Result Viewer")
-        self.root.geometry("900x700")
+        self.root.title("STB600 Result Viewer - Multi-Piece")
+        self.root.geometry("1000x800")
 
         # Load config
         self.config_path = config_path
         self.config = load_config(config_path)
 
-        # Current image and result
+        # Current image and results
         self.current_image = None
-        self.current_result = None
+        self.current_results = []  # List of PieceResult
+        self.annotated_image = None
 
-        # Source type for future expansion (image, video, camera)
+        # Source type for future expansion
         self.source_type = "image"
-        self.cap = None  # For video/camera
+        self.cap = None
 
         # Build UI
         self._build_ui()
@@ -81,50 +421,55 @@ class ResultViewerApp:
         status_label = ttk.Label(control_frame, textvariable=self.status_var)
         status_label.pack(side=tk.RIGHT, padx=10)
 
-        # Result info panel
-        info_frame = ttk.LabelFrame(self.root, text="Detection Result")
-        info_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        # Main content area with paned window
+        paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        # Result labels
-        result_grid = ttk.Frame(info_frame)
-        result_grid.pack(fill=tk.X, padx=10, pady=10)
+        # Left side: Image display
+        image_frame = ttk.Frame(paned)
+        paned.add(image_frame, weight=3)
 
-        ttk.Label(result_grid, text="Color:").grid(row=0, column=0, sticky="e", padx=5)
-        self.color_var = tk.StringVar(value="—")
-        self.color_label = ttk.Label(
-            result_grid, textvariable=self.color_var, font=("TkDefaultFont", 12, "bold")
-        )
-        self.color_label.grid(row=0, column=1, sticky="w", padx=5)
-
-        ttk.Label(result_grid, text="Size:").grid(row=0, column=2, sticky="e", padx=5)
-        self.size_var = tk.StringVar(value="—")
-        ttk.Label(result_grid, textvariable=self.size_var, font=("TkDefaultFont", 12)).grid(
-            row=0, column=3, sticky="w", padx=5
-        )
-
-        ttk.Label(result_grid, text="Value:").grid(row=0, column=4, sticky="e", padx=5)
-        self.value_var = tk.StringVar(value="—")
-        self.value_label = ttk.Label(
-            result_grid, textvariable=self.value_var,
-            font=("TkDefaultFont", 18, "bold"), foreground="#2563eb"
-        )
-        self.value_label.grid(row=0, column=5, sticky="w", padx=5)
-
-        ttk.Label(result_grid, text="Status:").grid(row=0, column=6, sticky="e", padx=5)
-        self.status_result_var = tk.StringVar(value="—")
-        self.status_result_label = ttk.Label(
-            result_grid, textvariable=self.status_result_var, font=("TkDefaultFont", 12, "bold")
-        )
-        self.status_result_label.grid(row=0, column=7, sticky="w", padx=5)
-
-        # Image display canvas
-        canvas_frame = ttk.Frame(self.root)
-        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
-
-        self.canvas = tk.Canvas(canvas_frame, bg="#2d2d2d")
+        self.canvas = tk.Canvas(image_frame, bg="#2d2d2d")
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        # Store photo reference to prevent garbage collection
+        # Right side: Results panel
+        results_frame = ttk.LabelFrame(paned, text="Detected Pieces")
+        paned.add(results_frame, weight=1)
+
+        # Results treeview with scrollbar
+        tree_frame = ttk.Frame(results_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        columns = ("color", "size", "value", "status")
+        self.results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=15)
+
+        self.results_tree.heading("color", text="Color")
+        self.results_tree.heading("size", text="Size")
+        self.results_tree.heading("value", text="Value")
+        self.results_tree.heading("status", text="Status")
+
+        self.results_tree.column("color", width=70, anchor="center")
+        self.results_tree.column("size", width=70, anchor="center")
+        self.results_tree.column("value", width=60, anchor="center")
+        self.results_tree.column("status", width=60, anchor="center")
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.results_tree.yview)
+        self.results_tree.configure(yscrollcommand=scrollbar.set)
+
+        self.results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Summary label
+        self.summary_var = tk.StringVar(value="No pieces detected")
+        summary_label = ttk.Label(results_frame, textvariable=self.summary_var, font=("TkDefaultFont", 10, "bold"))
+        summary_label.pack(pady=10)
+
+        # Total value label
+        self.total_var = tk.StringVar(value="")
+        total_label = ttk.Label(results_frame, textvariable=self.total_var, font=("TkDefaultFont", 14, "bold"), foreground="#2563eb")
+        total_label.pack(pady=5)
+
+        # Store photo reference
         self._photo = None
 
         # Bind resize event
@@ -147,7 +492,7 @@ class ResultViewerApp:
 
         img = cv2.imread(path)
         if img is None:
-            self.status_var.set(f"Error: Could not read image")
+            self.status_var.set("Error: Could not read image")
             return
 
         self.current_image = img
@@ -160,100 +505,119 @@ class ResultViewerApp:
 
     def load_video(self):
         """Load a video file (placeholder for future implementation)."""
-        # TODO: Implement video loading
         pass
 
     def toggle_camera(self):
         """Toggle camera input (placeholder for future implementation)."""
-        # TODO: Implement camera toggle
         pass
 
     def _process_and_display(self, img):
-        """Run the pipeline and display the result."""
+        """Run the pipeline on all pieces and display results."""
         try:
-            # Get shared config parameters
-            cfg = get_color_config(self.config, "blue")  # Use shared settings
-
-            # Extract parameters from config
-            rg = cfg.get("remove_green", {})
-            bz = cfg.get("binarize", {})
-            op = cfg.get("opening", {})
+            # Get config parameters
+            cfg = get_color_config(self.config, "blue")
+            
             bc = cfg.get("big_contours", {})
             ip = cfg.get("inner_parts", {})
             lb = cfg.get("labeled", {})
+            
+            # Get ROI config (stored at root level, not under "shared")
+            roi_config = self.config.get("rois", {})
 
-            # Run the pipeline
-            result = process_piece(
-                img,
-                debug=False,
-                threshold_value=bz.get("thresh_value", 0),
-                morph_kernel_size=(op.get("kernel_size", 5), op.get("kernel_size", 5)),
-                morph_iterations=op.get("iterations", 1),
-                main_min_area=bc.get("min_area", 10000),
-                main_max_area=bc.get("max_area", 500000),
-                small_area_max=bc.get("small_max", 30000),
-                medium_area_max=bc.get("medium_max", 90000),
-                inner_min_area=ip.get("min_area", 50),
-                inner_max_area=ip.get("max_area", 10000),
-                extent_threshold=lb.get("extent_threshold", 0.5),
-                label_small_area_max=lb.get("small_area_max", 2100),
-                label_medium_area_max=lb.get("medium_area_max", 5600),
+            # Use shared detection pipeline (handles preprocessing, inversion, contour finding)
+            contours, processed_binary, _ = detect_pieces_in_frame(
+                img, cfg, auto_invert=True
             )
+            
+            # Get detection ranges from shared function
+            red_range, yellow_range, blue_range, _, _ = get_detection_ranges(cfg)
+            
+            if not contours:
+                self.status_var.set("No pieces found")
+                self._clear_results()
+                self._display_image(img)
+                return
 
-            self.current_result = result
+            # Step 5: Process each contour
+            results = []
+            for contour in contours:
+                try:
+                    result = process_single_contour(
+                        img,
+                        contour,
+                        red_range=red_range,
+                        yellow_range=yellow_range,
+                        blue_range=blue_range,
+                        inner_min_area=ip.get("min_area", 50),
+                        inner_max_area=ip.get("max_area", 10000),
+                        extent_threshold=lb.get("extent_threshold", 0.5),
+                        label_small_area_max=lb.get("small_area_max", 2100),
+                        label_medium_area_max=lb.get("medium_area_max", 5600),
+                        roi_config=roi_config,
+                        debug=False,
+                    )
+                    
+                    # Skip rejected contours (not enough color)
+                    if result is not None:
+                        results.append(result)
+                        
+                except Exception:
+                    continue
 
-            # Update result display
-            self._update_result_display(result)
+            self.current_results = results
 
-            # Display annotated image
-            self._display_image(result.annotated_image)
+            # Annotate image with all results
+            self.annotated_image = annotate_multiple_pieces(img, results)
 
-            self.status_var.set("Processing complete")
+            # Update UI
+            self._update_results_display(results)
+            self._display_image(self.annotated_image)
+
+            self.status_var.set(f"Found {len(results)} piece(s)")
 
         except Exception as e:
             self.status_var.set(f"Error: {str(e)}")
-            self._clear_result_display()
-            # Still show original image
+            self._clear_results()
             if img is not None:
                 self._display_image(img)
 
-    def _update_result_display(self, result: PipelineResult):
-        """Update the result info panel with detection results."""
-        # Color
-        self.color_var.set(result.piece_color.upper())
-        color_map = {
-            "blue": "#2563eb",
-            "red": "#dc2626",
-            "yellow": "#ca8a04",
-        }
-        fg = color_map.get(result.piece_color.lower(), "gray")
-        self.color_label.config(foreground=fg)
+    def _update_results_display(self, results: List[PieceResult]):
+        """Update the results panel with detection results."""
+        # Clear existing items
+        for item in self.results_tree.get_children():
+            self.results_tree.delete(item)
 
-        # Size
-        self.size_var.set(result.size_label)
+        # Add new items
+        total_value = 0
+        valid_count = 0
 
-        # Value
-        if result.total_value is not None:
-            self.value_var.set(str(result.total_value))
+        for i, result in enumerate(results):
+            color = result.piece_color.upper()
+            size = result.size_label
+            value = str(result.total_value) if result.total_value is not None else "?"
+            status = "OK" if result.is_consistent else "!"
+
+            self.results_tree.insert("", tk.END, values=(color, size, value, status))
+
+            if result.total_value is not None:
+                total_value += result.total_value
+                valid_count += 1
+
+        # Update summary
+        self.summary_var.set(f"{len(results)} piece(s) detected")
+
+        if valid_count > 0:
+            self.total_var.set(f"Total: {total_value}")
         else:
-            self.value_var.set("—")
+            self.total_var.set("")
 
-        # Status
-        if result.is_consistent:
-            self.status_result_var.set("OK")
-            self.status_result_label.config(foreground="green")
-        else:
-            self.status_result_var.set("MISMATCH")
-            self.status_result_label.config(foreground="orange")
-
-    def _clear_result_display(self):
-        """Clear the result info panel."""
-        self.color_var.set("—")
-        self.color_label.config(foreground="gray")
-        self.size_var.set("—")
-        self.value_var.set("—")
-        self.status_result_var.set("—")
-        self.status_result_label.config(foreground="gray")
+    def _clear_results(self):
+        """Clear the results display."""
+        for item in self.results_tree.get_children():
+            self.results_tree.delete(item)
+        self.summary_var.set("No pieces detected")
+        self.total_var.set("")
+        self.current_results = []
 
     def _display_image(self, img_bgr):
         """Display a BGR image on the canvas, scaled to fit."""
@@ -268,11 +632,10 @@ class ResultViewerApp:
         canvas_h = self.canvas.winfo_height()
 
         if canvas_w < 10 or canvas_h < 10:
-            # Canvas not ready yet, schedule retry
             self.root.after(50, lambda: self._display_image(img_bgr))
             return
 
-        # Scale image to fit canvas while maintaining aspect ratio
+        # Scale image to fit canvas
         img_h, img_w = img_rgb.shape[:2]
         scale = min(canvas_w / img_w, canvas_h / img_h)
         new_w = int(img_w * scale)
@@ -283,20 +646,20 @@ class ResultViewerApp:
         else:
             img_resized = img_rgb
 
-        # Convert to PIL and then to PhotoImage
+        # Convert to PhotoImage
         pil_img = Image.fromarray(img_resized)
         self._photo = ImageTk.PhotoImage(pil_img)
 
-        # Clear canvas and draw image centered
+        # Draw centered
         self.canvas.delete("all")
         x = (canvas_w - new_w) // 2
         y = (canvas_h - new_h) // 2
         self.canvas.create_image(x, y, anchor=tk.NW, image=self._photo)
 
     def _on_canvas_resize(self, event):
-        """Handle canvas resize to update image display."""
-        if self.current_result is not None:
-            self._display_image(self.current_result.annotated_image)
+        """Handle canvas resize."""
+        if self.annotated_image is not None:
+            self._display_image(self.annotated_image)
         elif self.current_image is not None:
             self._display_image(self.current_image)
 
@@ -310,7 +673,7 @@ class ResultViewerApp:
 
 def run_result_viewer(config_path=DEFAULT_CONFIG_PATH):
     """
-    Launch the result viewer GUI.
+    Launch the result viewer GUI for multi-piece detection.
 
     Parameters
     ----------

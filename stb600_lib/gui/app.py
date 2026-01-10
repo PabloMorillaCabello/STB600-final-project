@@ -170,16 +170,20 @@ class PipelineApp:
         if "iterations" in op:
             self.tab_opening.iterations.set(int(op["iterations"]))
 
-        # Big contours
+        # Big contours (per-color ranges)
         bc = cfg.get("big_contours", {})
-        if "min_area" in bc:
-            self.tab_big_contours.min_area.set(int(bc["min_area"]))
-        if "max_area" in bc:
-            self.tab_big_contours.max_area.set(int(bc["max_area"]))
-        if "small_max" in bc:
-            self.tab_big_contours.small_max.set(int(bc["small_max"]))
-        if "medium_max" in bc:
-            self.tab_big_contours.medium_max.set(int(bc["medium_max"]))
+        if "red_min" in bc:
+            self.tab_big_contours.red_min.set(int(bc["red_min"]))
+        if "red_max" in bc:
+            self.tab_big_contours.red_max.set(int(bc["red_max"]))
+        if "yellow_min" in bc:
+            self.tab_big_contours.yellow_min.set(int(bc["yellow_min"]))
+        if "yellow_max" in bc:
+            self.tab_big_contours.yellow_max.set(int(bc["yellow_max"]))
+        if "blue_min" in bc:
+            self.tab_big_contours.blue_min.set(int(bc["blue_min"]))
+        if "blue_max" in bc:
+            self.tab_big_contours.blue_max.set(int(bc["blue_max"]))
 
         # Inner parts
         ip = cfg.get("inner_parts", {})

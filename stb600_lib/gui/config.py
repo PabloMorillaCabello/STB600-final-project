@@ -20,7 +20,11 @@ DEFAULT_CONFIG = {
         "remove_green": {"h_low": 35, "h_high": 85},
         "binarize": {"thresh_value": 0},
         "opening": {"kernel_size": 5, "iterations": 1},
-        "big_contours": {"min_area": 10000, "max_area": 500000, "small_max": 30000, "medium_max": 90000},
+        "big_contours": {
+            "red_min": 5000, "red_max": 80000,
+            "yellow_min": 80000, "yellow_max": 160000,
+            "blue_min": 160000, "blue_max": 250000,
+        },
         "inner_parts": {"min_area": 50, "max_area": 10000},
         "labeled": {"extent_threshold": 0.5, "small_area_max": 2100, "medium_area_max": 5600},
     },

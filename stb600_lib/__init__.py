@@ -24,12 +24,18 @@ from .io import load_source_cv2
 from .display import (
     show_image,
     annotate_part_result,
+    annotate_multiple_pieces,
+    draw_piece_box,
     draw_labeled_contours_colored,
     draw_horizontal_rois_from_boundaries,
     resize_to_screen,
     pad_to_same_size,
     make_row,
     make_grid,
+    PIECE_COLOR_MAP,
+    FAKE_COLOR,
+    COUNTED_COLOR,
+    TRACKING_COLOR,
 )
 
 # Color processing functions
@@ -37,6 +43,7 @@ from .color import (
     remove_color_hsv,
     detect_piece_color_and_check_size,
     detect_color_parts,
+    classify_by_color_ranges,
 )
 
 # Morphology functions
@@ -73,7 +80,25 @@ from .transforms import (
 )
 
 # Pipeline functions
-from .pipeline import process_piece
+from .pipeline import process_piece, PieceResult
+
+# Detection functions (shared by result_viewer and video_processor)
+from .detection import (
+    preprocess_frame,
+    find_piece_contours,
+    get_detection_ranges,
+    detect_pieces_in_frame,
+)
+
+# Tracking functions
+from .tracking import (
+    create_tracker,
+    detection_to_norfair,
+    CountingLine,
+    PieceCounter,
+    TrackedPiece,
+    NORFAIR_AVAILABLE,
+)
 
 __version__ = "1.0.0"
 __all__ = [
@@ -82,16 +107,23 @@ __all__ = [
     # Display
     "show_image",
     "annotate_part_result",
+    "annotate_multiple_pieces",
+    "draw_piece_box",
     "draw_labeled_contours_colored",
     "draw_horizontal_rois_from_boundaries",
     "resize_to_screen",
     "pad_to_same_size",
     "make_row",
     "make_grid",
+    "PIECE_COLOR_MAP",
+    "FAKE_COLOR",
+    "COUNTED_COLOR",
+    "TRACKING_COLOR",
     # Color
     "remove_color_hsv",
     "detect_piece_color_and_check_size",
     "detect_color_parts",
+    "classify_by_color_ranges",
     # Morphology
     "apply_morphological_closing",
     "apply_morphological_opening",
@@ -112,4 +144,17 @@ __all__ = [
     "rotate_if_blue_piece_upside_down",
     # Pipeline
     "process_piece",
+    "PieceResult",
+    # Detection
+    "preprocess_frame",
+    "find_piece_contours",
+    "get_detection_ranges",
+    "detect_pieces_in_frame",
+    # Tracking
+    "create_tracker",
+    "detection_to_norfair",
+    "CountingLine",
+    "PieceCounter",
+    "TrackedPiece",
+    "NORFAIR_AVAILABLE",
 ]

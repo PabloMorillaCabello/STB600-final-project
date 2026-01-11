@@ -10,7 +10,6 @@ import cv2
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 
-from .color import remove_color_hsv
 from .morphology import binarize_and_invert, apply_morphological_opening
 
 
@@ -19,12 +18,14 @@ def preprocess_frame(
     threshold_value: int = 0,
     kernel_size: int = 5,
     iterations: int = 1,
+    h_low: int = 35,
+    h_high: int = 85,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Apply standard preprocessing pipeline to an image.
     
     Steps:
-    1. Remove green background
+    1. Remove green background (using config HSV values)
     2. Convert to grayscale and binarize (with inversion)
     3. Apply morphological opening
     
@@ -38,6 +39,10 @@ def preprocess_frame(
         Size of morphological kernel.
     iterations : int
         Number of morphological iterations.
+    h_low : int
+        Lower hue bound for green removal.
+    h_high : int
+        Upper hue bound for green removal.
     
     Returns
     -------
@@ -48,8 +53,13 @@ def preprocess_frame(
     processed : np.ndarray
         Final processed binary image after morphological operations.
     """
-    # Step 1: Remove green background
-    no_green, _ = remove_color_hsv(img, "green")
+    # Step 1: Remove green background using config values (same as RemoveGreenTab)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    lower = np.array([h_low, 40, 40])
+    upper = np.array([h_high, 255, 255])
+    mask = cv2.inRange(hsv, lower, upper)
+    no_green = img.copy()
+    no_green[mask > 0] = 0
     
     # Step 2: Binarize
     _, binary = binarize_and_invert(no_green, threshold_value=threshold_value)
@@ -220,15 +230,18 @@ def detect_pieces_in_frame(
         Debug information from all processing steps.
     """
     # Get config values
+    rg = config.get("remove_green", {})
     bz = config.get("binarize", {})
     op = config.get("opening", {})
     
-    # Preprocess
+    # Preprocess (using config values for green removal - same as pipeline GUI)
     no_green, binary, processed = preprocess_frame(
         img,
         threshold_value=bz.get("thresh_value", 0),
         kernel_size=op.get("kernel_size", 5),
         iterations=op.get("iterations", 1),
+        h_low=rg.get("h_low", 35),
+        h_high=rg.get("h_high", 85),
     )
     
     # Get detection ranges

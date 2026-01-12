@@ -11,19 +11,24 @@ import numpy as np
 
 
 
+
 # conecting to the first available camera
 camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
 
+
 # Grabing Continusely (video) with minimal delay
-camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly) 
+camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
 converter = pylon.ImageFormatConverter()
+
 
 # converting to opencv bgr format
 converter.OutputPixelFormat = pylon.PixelType_BGR8packed
 converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
 
+
 while camera.IsGrabbing():
     grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+
 
     if grabResult.GrabSucceeded():
         # Access the image data
@@ -31,18 +36,20 @@ while camera.IsGrabbing():
         img = image.GetArray()
         gray_frame = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
+
         # Display the resulting frame
         # resize for better visualization (but make sure to maintain aspect ratio)
         resized = cv2.resize(img, (640, int(640 * img.shape[0] / img.shape[1])))
         cv2.imshow('basler live feed', resized)
-        
+       
         #cv2.imshow('title', combined_img)
         k = cv2.waitKey(1)
         if k == 27:
             break
     grabResult.Release()
-    
+   
 # Releasing the resource    
 camera.StopGrabbing()
+
 
 cv2.destroyAllWindows()

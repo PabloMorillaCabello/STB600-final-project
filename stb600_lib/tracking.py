@@ -30,9 +30,9 @@ class TrackedPiece:
 
 
 def create_tracker(
-    distance_threshold: float = 100.0,
-    hit_counter_max: int = 15,
-    initialization_delay: int = 3,
+    distance_threshold: float = 150.0,
+    hit_counter_max: int = 10,
+    initialization_delay: int = 2,
     pointwise_hit_counter_max: int = 4,
 ) -> "Tracker":
     """
@@ -94,7 +94,7 @@ class CountingLine:
     
     def __init__(
         self,
-        position: float = 0.7,
+        position: float = 0.5,
         direction: str = "horizontal",
         frame_width: int = 640,
         frame_height: int = 480,

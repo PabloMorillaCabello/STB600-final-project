@@ -10,6 +10,9 @@ import os
 import tkinter as tk
 from tkinter import ttk
 
+# NEW: pypylon imports for Basler
+from pypylon import pylon  # type: ignore
+
 from .base import cv_bgr_to_tk
 from .config import load_config, save_config, get_color_config, update_color_config, DEFAULT_CONFIG_PATH
 from .tabs import (
@@ -77,8 +80,10 @@ class PipelineApp:
         self.boundaries = None
 
         # Camera state
-        self.cap = None
+        # CHANGED: use Basler camera instead of cv2.VideoCapture
         self.camera_running = False
+        self.basler_camera = None
+        self.basler_converter = None
 
         # Load initial image if provided
         if use_camera:
@@ -261,16 +266,38 @@ class PipelineApp:
         self.roi_counts = None
         self.boundaries = None
 
+    def _start_basler_camera(self):
+        """
+        Initialize and start grabbing from the Basler camera using pypylon.
+        """
+        # Connect to first available Basler camera
+        self.basler_camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())  
+        self.basler_camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)  # continuous with minimal delay [web:7]
+
+        # ImageFormatConverter to get BGR for OpenCV
+        self.basler_converter = pylon.ImageFormatConverter() 
+        self.basler_converter.OutputPixelFormat = pylon.PixelType_BGR8packed  # BGR8 for OpenCV [web:5]
+        self.basler_converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned  
+
+    def _stop_basler_camera(self):
+        """Stop grabbing and release Basler camera resources."""
+        if self.basler_camera is not None:
+            try:
+                if self.basler_camera.IsGrabbing():
+                    self.basler_camera.StopGrabbing()
+            except Exception:
+                pass
+            self.basler_camera = None
+        self.basler_converter = None
+
     def set_camera_enabled(self, enabled):
-        """Enable or disable camera input."""
+        """Enable or disable Basler camera input."""
         if enabled and not self.camera_running:
-            self.cap = cv2.VideoCapture(0)
+            self._start_basler_camera()
             self.camera_running = True
             self.root.after(30, self.update_camera)
         elif not enabled and self.camera_running:
-            if self.cap is not None:
-                self.cap.release()
-                self.cap = None
+            self._stop_basler_camera()
             self.camera_running = False
 
     def get_base_image(self):
@@ -300,18 +327,33 @@ class PipelineApp:
             tab_widget.update_image()
 
     def update_camera(self):
-        """Camera update loop."""
-        if self.camera_running and self.cap is not None:
-            ret, frame = self.cap.read()
-            if ret:
-                self.base_image = frame
-                self.tab_input.update_image()
+        """
+        Camera update loop using Basler frames.
+
+        Grabs the latest image from the Basler camera and updates the input tab.
+        """
+        if self.camera_running and self.basler_camera is not None and self.basler_camera.IsGrabbing():
+            try:
+                grab_result = self.basler_camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)  
+            except Exception:
+                grab_result = None
+
+            if grab_result is not None:
+                if grab_result.GrabSucceeded():  
+                    # Convert to OpenCV BGR image
+                    image = self.basler_converter.Convert(grab_result) 
+                    frame = image.GetArray()  
+                    self.base_image = frame
+                    self.tab_input.update_image()
+                grab_result.Release()
+        # Schedule next frame grab
+        if self.camera_running:
             self.root.after(30, self.update_camera)
 
     def on_close(self):
         """Handle window close."""
-        if self.cap is not None:
-            self.cap.release()
+        # Stop Basler camera if running
+        self._stop_basler_camera()
         cv2.destroyAllWindows()
         self.root.destroy()
 

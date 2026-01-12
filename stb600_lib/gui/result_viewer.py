@@ -11,7 +11,10 @@ import numpy as np
 import tkinter as tk
 from tkinter import ttk, filedialog
 from PIL import Image, ImageTk
-from typing import List
+from typing import List, Optional
+
+# NEW: Basler / pypylon
+from pypylon import pylon
 
 from ..color import classify_by_color_ranges
 from ..contours import (
@@ -30,29 +33,6 @@ from .config import load_config, get_color_config, DEFAULT_CONFIG_PATH
 def compute_rois_from_config(image_shape, features_list, piece_color, roi_config):
     """
     Compute ROIs using saved config settings (matching run_pipeline_gui behavior).
-
-    Parameters
-    ----------
-    image_shape : tuple
-        Image shape (height, width, ...).
-    features_list : list of dict
-        Feature dictionaries with "centroid" and "label".
-    piece_color : str
-        Piece color for ROI configuration.
-    roi_config : dict
-        ROI settings per color {"red": {"num_rois": 2, ...}, ...}.
-
-    Returns
-    -------
-    rois : list of dict
-        ROI descriptors with counts.
-    boundaries : list of tuple
-        (y_start, y_end) for each ROI.
-    
-    Raises
-    ------
-    ValueError
-        If roi_config is missing or doesn't have settings for the piece color.
     """
     if not roi_config:
         raise ValueError("ROI config is required. Run run_pipeline_gui to configure ROI settings.")
@@ -138,30 +118,6 @@ def process_single_contour(
 ):
     """
     Process a single contour through the detection pipeline.
-
-    Parameters
-    ----------
-    img : np.ndarray
-        Original BGR image.
-    contour : np.ndarray
-        Contour to process.
-    red_range : tuple
-        (min, max) area range for red (small) pieces.
-    yellow_range : tuple
-        (min, max) area range for yellow (medium) pieces.
-    blue_range : tuple
-        (min, max) area range for blue (large) pieces.
-    roi_config : dict or None
-        ROI settings per color from pipeline_config.json.
-        e.g. {"red": {"num_rois": 2, "offset_pct": 0, "height_pct": 100}, ...}
-    debug : bool
-        If True, print debug information.
-    Other parameters control inner part detection and labeling.
-
-    Returns
-    -------
-    PieceResult or None
-        Detection result for this piece, or None if rejected (not a valid piece).
     """
     area = cv2.contourArea(contour)
     
@@ -361,13 +317,6 @@ class ResultViewerApp:
 
     Displays annotated image with bounding boxes and decoded values for all pieces.
     Designed for easy extension to video and camera input.
-
-    Parameters
-    ----------
-    root : tk.Tk
-        Root Tkinter window.
-    config_path : str
-        Path to configuration JSON file.
     """
 
     def __init__(self, root, config_path=DEFAULT_CONFIG_PATH):
@@ -384,9 +333,13 @@ class ResultViewerApp:
         self.current_results = []  # List of PieceResult
         self.annotated_image = None
 
-        # Source type for future expansion
+        # Source type: "image" or "camera"
         self.source_type = "image"
-        self.cap = None
+
+        # Basler camera state
+        self.basler_camera: Optional[pylon.InstantCamera] = None
+        self.basler_converter: Optional[pylon.ImageFormatConverter] = None
+        self.camera_running = False
 
         # Build UI
         self._build_ui()
@@ -403,15 +356,15 @@ class ResultViewerApp:
         )
         btn_load_image.pack(side=tk.LEFT, padx=(0, 5))
 
-        # Placeholder buttons for future video/camera support
         btn_load_video = ttk.Button(
             control_frame, text="Load Video", command=self.load_video, state="disabled"
         )
         btn_load_video.pack(side=tk.LEFT, padx=5)
         self.btn_load_video = btn_load_video
 
+        # Camera button now enabled: toggles Basler camera
         btn_camera = ttk.Button(
-            control_frame, text="Camera", command=self.toggle_camera, state="disabled"
+            control_frame, text="Camera", command=self.toggle_camera
         )
         btn_camera.pack(side=tk.LEFT, padx=5)
         self.btn_camera = btn_camera
@@ -478,6 +431,8 @@ class ResultViewerApp:
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    # ------------------ Image / Video / Camera control ------------------------
+
     def load_image(self):
         """Open file dialog and load an image."""
         path = filedialog.askopenfilename(
@@ -495,6 +450,10 @@ class ResultViewerApp:
             self.status_var.set("Error: Could not read image")
             return
 
+        # Stop camera if running
+        if self.camera_running:
+            self._stop_camera()
+
         self.current_image = img
         self.source_type = "image"
         self.status_var.set("Processing...")
@@ -507,9 +466,96 @@ class ResultViewerApp:
         """Load a video file (placeholder for future implementation)."""
         pass
 
+    # --- Basler camera helpers ------------------------------------------------
+
+    def _start_basler_camera(self) -> bool:
+        """Initialize and start grabbing from the Basler camera."""
+        try:
+            self.basler_camera = pylon.InstantCamera(
+                pylon.TlFactory.GetInstance().CreateFirstDevice()
+            )
+            self.basler_camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)  # continuous, low latency [web:1]
+
+            self.basler_converter = pylon.ImageFormatConverter()
+            self.basler_converter.OutputPixelFormat = pylon.PixelType_BGR8packed  # OpenCV BGR [web:1]
+            self.basler_converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+
+            return True
+        except Exception as e:
+            self.status_var.set(f"Error: Could not open Basler camera ({e})")
+            self.basler_camera = None
+            self.basler_converter = None
+            return False
+
+    def _stop_camera(self):
+        """Stop camera grabbing and release resources."""
+        self.camera_running = False
+        if self.basler_camera is not None:
+            try:
+                if self.basler_camera.IsGrabbing():
+                    self.basler_camera.StopGrabbing()
+            except Exception:
+                pass
+            self.basler_camera = None
+        self.basler_converter = None
+        self.source_type = "image"
+        self.status_var.set("Camera stopped")
+
+    def _grab_camera_frame(self) -> Optional[np.ndarray]:
+        """Grab a single frame from Basler camera."""
+        if not self.basler_camera or not self.basler_converter:
+            return None
+        if not self.basler_camera.IsGrabbing():
+            return None
+
+        try:
+            grab_result = self.basler_camera.RetrieveResult(
+                5000, pylon.TimeoutHandling_ThrowException
+            )
+        except Exception:
+            return None
+
+        frame = None
+        if grab_result is not None:
+            if grab_result.GrabSucceeded():
+                image = self.basler_converter.Convert(grab_result)
+                frame = image.GetArray()
+            grab_result.Release()
+        return frame
+
     def toggle_camera(self):
-        """Toggle camera input (placeholder for future implementation)."""
-        pass
+        """Toggle camera input."""
+        if self.camera_running:
+            self._stop_camera()
+            return
+
+        # Start camera
+        if not self._start_basler_camera():
+            return
+
+        self.camera_running = True
+        self.source_type = "camera"
+        self.status_var.set("Camera running")
+        self.current_image = None
+        self.annotated_image = None
+        self._clear_results()
+
+        # Kick off camera loop
+        self._camera_loop()
+
+    def _camera_loop(self):
+        """Periodic loop to grab from camera, process, and display."""
+        if not self.camera_running:
+            return
+
+        frame = self._grab_camera_frame()
+        if frame is not None:
+            self.current_image = frame
+            self._process_and_display(frame)
+        # Schedule next iteration
+        self.root.after(50, self._camera_loop)
+
+    # -------------------- Processing and display ------------------------------
 
     def _process_and_display(self, img):
         """Run the pipeline on all pieces and display results."""
@@ -665,8 +711,8 @@ class ResultViewerApp:
 
     def on_close(self):
         """Handle window close."""
-        if self.cap is not None:
-            self.cap.release()
+        if self.camera_running:
+            self._stop_camera()
         cv2.destroyAllWindows()
         self.root.destroy()
 
@@ -674,16 +720,6 @@ class ResultViewerApp:
 def run_result_viewer(config_path=DEFAULT_CONFIG_PATH):
     """
     Launch the result viewer GUI for multi-piece detection.
-
-    Parameters
-    ----------
-    config_path : str
-        Path to configuration JSON file.
-
-    Example
-    -------
-    >>> from stb600_lib.gui import run_result_viewer
-    >>> run_result_viewer()
     """
     root = tk.Tk()
     app = ResultViewerApp(root, config_path=config_path)

@@ -218,7 +218,7 @@ def detect_pieces_in_frame(
         The processed binary image (possibly inverted).
     debug_info : dict
         Debug information from all processing steps.
-    """
+    """ 
     # Get config values
     bz = config.get("binarize", {})
     op = config.get("opening", {})

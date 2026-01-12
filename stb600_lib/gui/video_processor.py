@@ -1,5 +1,5 @@
 """
-Video processor GUI for detecting and counting LEGO pieces.
+Video processor GUI for detecting and counting pieces.
 Supports video files and live camera feeds with object tracking.
 """
 
@@ -11,7 +11,7 @@ from PIL import Image, ImageTk
 from typing import Optional, Dict, Tuple
 import time
 
-# NEW: pypylon import for Basler camera
+
 from pypylon import pylon
 
 from ..tracking import (
@@ -37,7 +37,7 @@ class VideoProcessorApp:
     def __init__(self, root: tk.Tk):
         """Initialize the video processor application."""
         self.root = root
-        self.root.title("LEGO Piece Counter - Video Processor")
+        self.root.title("Piece Counter - Video Processor")
         self.root.geometry("1200x800")
 
         # Check Norfair availability

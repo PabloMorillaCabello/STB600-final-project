@@ -3,8 +3,8 @@ GUI App Module - Main Pipeline Application
 ==========================================
 
 Provides the main PipelineApp class that orchestrates all GUI tabs.
-"""
-
+""" 
+ 
 import cv2
 import os
 import tkinter as tk
